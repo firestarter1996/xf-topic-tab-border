@@ -1,0 +1,243 @@
+__id__ = "topic_tab_border"
+__name__ = "Topic Tab Border"
+__description__ = "Draws a border around the selected topic tab in forum groups, in the accent color, like the Media, Files and Links switch on a profile. The tab's background stays as it is. Made by [firestarter1996](https://github.com/firestarter1996)."
+__author__ = "firestarter1996"
+__version__ = "1.0.6"
+
+# Stock XF marks the selected topic in the top topic tabs with a faint filled pill
+# only (TopicsTabsView: topTabs.dispatchDraw draws lineRect with linePaint at alpha
+# 31). The app's own "Tab Indicator Stroke" setting only styles the folder tabs.
+# This plugin runs after that draw and strokes the same rounded rect (it follows
+# the slide animation between tabs), so the fill is unchanged and a border is added.
+#
+# Speed (1.0.2): dispatchDraw runs on every frame the tabs move, so the per frame
+# work is kept to a few Java calls: no field lookups by name, no scan of the tabs,
+# settings read at most twice a second. A before hook empties lineRect; stock fills
+# it only when the selected tab is on screen, so a filled rect after the draw means
+# "selected tab visible" without walking the children.
+# Logcat tag: TopicTabBorder.
+
+import time
+
+from java import jclass, jint, dynamic_proxy
+from base_plugin import BasePlugin, MethodHook
+from hook_utils import find_class, get_private_field
+from android_utils import dp
+from ui.settings import Header, Switch, Selector
+
+LOG_TAG = "TopicTabBorder"
+Paint = jclass("android.graphics.Paint")
+PaintStyle = jclass("android.graphics.Paint$Style")
+Theme = jclass("org.telegram.ui.ActionBar.Theme")
+WIDTHS = [1.0, 1.5, 2.0]
+
+
+class _Fix(dynamic_proxy(jclass("java.lang.Runnable"))):
+    """Sets one tab's selected look back in line with the open topic, after the frame."""
+    def __init__(self, tab, want):
+        super().__init__()
+        self.tab = tab
+        self.want = want
+
+    def run(self):
+        try:
+            self.tab.setSelected(self.want)
+        except Exception:
+            pass
+
+
+def _log(msg):
+    try:
+        jclass("android.util.Log").i(LOG_TAG, str(msg))
+    except Exception:
+        pass
+
+
+class TopicTabBorderPlugin(BasePlugin):
+
+    def create_settings(self):
+        return [
+            Header(text="Topic Tab Border"),
+            Switch(key="enabled", text="Border on the selected topic tab", default=True),
+            Selector(key="width", text="Border width", default=1, items=["Thin", "Medium", "Thick"]),
+        ]
+
+    def on_plugin_load(self):
+        self.errors = 0
+        self.paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        self.paint.setStyle(PaintStyle.STROKE)
+        self.fill = Paint(Paint.ANTI_ALIAS_FLAG)
+        self.views = {}       # tabs list hash -> (lineRect, resourcesProvider)
+        self.conf_t = 0.0
+        self.conf = (True, 1.5)
+        self.r14 = float(dp(14))
+        tabs_cls = find_class("org.telegram.ui.Components.TopicsTabsView")
+        tab_view = find_class("org.telegram.ui.Components.TopicsTabsView$HorizontalTabView")
+        canvas_cls = find_class("android.graphics.Canvas")
+        target = None
+        for i in range(1, 60):
+            c = find_class("org.telegram.ui.Components.TopicsTabsView$%d" % i)
+            if c is None:
+                continue
+            try:
+                c.getDeclaredField("lineRect")
+                c.getDeclaredField("linePaint")
+                target = c
+                break
+            except Exception:
+                pass
+        if target is None:
+            _log("top tabs class not found")
+            return
+        plugin = self
+
+        self.rect_field = target.getDeclaredField("lineRect")
+        self.rect_field.setAccessible(True)
+        self.tab_cls = tab_view
+        self.sel_field = tab_view.getDeclaredField("selected")
+        self.sel_field.setAccessible(True)
+        self.add_field = tab_view.getDeclaredField("isAdd")
+        self.add_field.setAccessible(True)
+        self.cur_field = tabs_cls.getDeclaredField("currentTopicId")
+        self.cur_field.setAccessible(True)
+        self.own = jclass("android.graphics.RectF")()
+        self.d1 = float(dp(1))
+        self.d4 = float(dp(4))
+        self.diag = 0
+
+        class DrawHook(MethodHook):
+            def before_hooked_method(self, param):
+                try:
+                    v = plugin._view(param.thisObject)
+                    if v is not None:
+                        v[0].setEmpty()
+                except Exception as e:
+                    if plugin.errors < 3:
+                        plugin.errors += 1
+                        _log("draw before: %s" % e)
+
+            def after_hooked_method(self, param):
+                try:
+                    plugin._draw(param.thisObject, param.args[0])
+                except Exception as e:
+                    if plugin.errors < 3:
+                        plugin.errors += 1
+                        _log("draw: %s" % e)
+
+        self.hook_method(target.getDeclaredMethod("dispatchDraw", canvas_cls), DrawHook())
+
+        # 1.0.5: a tab that turns selected or unselected only redraws itself, so the strip
+        # (where the selection is drawn) could keep showing an old frame with no border on
+        # the open topic (Updates, 11-05-2026). Redraw the strip once when that happens.
+        class SelectHook(MethodHook):
+            def after_hooked_method(self, param):
+                try:
+                    par = param.thisObject.getParent()
+                    if par is not None:
+                        par.invalidate()
+                except Exception:
+                    pass
+
+        bool_t = jclass("java.lang.Boolean").TYPE
+        for m in tab_view.getDeclaredMethods():
+            if m.getName() == "setSelected" and len(m.getParameterTypes()) == 1 and m.getParameterTypes()[0] == bool_t:
+                self.hook_method(m, SelectHook())
+        _log("loaded %s on %s" % (__version__, target.getName()))
+
+    def _settings(self):
+        now = time.monotonic()
+        if now - self.conf_t > 0.5:
+            self.conf_t = now
+            try:
+                w = WIDTHS[int(self.get_setting("width", 1))]
+            except Exception:
+                w = 1.5
+            self.conf = (bool(self.get_setting("enabled", True)), float(dp(w)))
+        return self.conf
+
+    def _view(self, rv):
+        key = int(rv.hashCode())
+        v = self.views.get(key)
+        if v is None:
+            outer = get_private_field(rv, "this$0")
+            rp = get_private_field(outer, "resourcesProvider") if outer is not None else None
+            v = (self.rect_field.get(rv), rp, outer)
+            if len(self.views) > 20:
+                self.views.clear()
+            self.views[key] = v
+        return v
+
+    def _draw(self, rv, canvas):
+        enabled, sw = self._settings()
+        if not enabled:
+            return
+        v = self._view(rv)
+        rect = v[0]
+        # the border always follows the tab that shows itself as selected; the stock
+        # rect is used only while it sits on that tab (so the slide animation is kept)
+        own = self._selected_rect(rv, v[2])
+        if own is None:
+            return
+        if rect is None or rect.isEmpty() or not (own.left - self.d4 <= rect.centerX() <= own.right + self.d4):
+            rect = own
+            stock_missed = True
+        else:
+            stock_missed = False
+        color = int(Theme.getColor(Theme.key_featuredStickers_addButton, v[1]))
+        if stock_missed:
+            # stock drew its light fill on no tab or on another one: give the open tab its fill
+            self.fill.setColor(jint((color & 0x00FFFFFF) | (31 << 24)))
+            canvas.drawRoundRect(rect, self.r14, self.r14, self.fill)
+        self.paint.setColor(jint(color))
+        self.paint.setStrokeWidth(sw)
+        half = sw / 2.0
+        rect.inset(half, half)
+        canvas.drawRoundRect(rect, self.r14 - half, self.r14 - half, self.paint)
+        rect.inset(-half, -half)
+
+    def _selected_rect(self, rv, outer):
+        """The open topic's tab (by the strip's own currentTopicId, not by the tabs' bold flags).
+        1.0.6: a tab could keep its selected look after another topic opened (Updates and WSL2
+        stayed bold and blue on 11-06-2026), and the border then followed that stale flag. Any tab
+        whose flag disagrees with the open topic is set right after this frame, once."""
+        try:
+            cur = int(self.cur_field.getLong(outer))
+        except Exception:
+            cur = None
+        found = None
+        n = int(rv.getChildCount())
+        for i in range(n):
+            ch = rv.getChildAt(i)
+            if not self.tab_cls.isInstance(ch) or self.add_field.getBoolean(ch):
+                continue
+            sel = self.sel_field.getBoolean(ch)
+            if cur is None:
+                want = sel
+            else:
+                want = int(ch.getTopicId()) == cur
+                if sel != want and int(rv.getChildAdapterPosition(ch)) >= 0:
+                    rv.post(_Fix(ch, want))
+                    self._diag(rv, cur, "fix %d->%s" % (int(ch.getTopicId()), want))
+            if want and (found is None or int(rv.getChildAdapterPosition(ch)) >= 0):
+                found = ch
+        if found is None:
+            if cur is not None:
+                self._diag(rv, cur, "open tab not on screen")
+            return None
+        x = float(found.getX())
+        y = float(found.getY())
+        self.own.set(x + self.d1, y + self.d4, x + float(found.getWidth()) - self.d1, y + float(rv.getHeight()) - self.d4)
+        return self.own
+
+    def _diag(self, rv, cur, why):
+        # at most 30 lines per app run, only when something is out of line
+        if self.diag >= 30:
+            return
+        self.diag += 1
+        parts = []
+        for i in range(int(rv.getChildCount())):
+            ch = rv.getChildAt(i)
+            if self.tab_cls.isInstance(ch):
+                parts.append("%d:%s:p%d:x%d" % (int(ch.getTopicId()), "S" if self.sel_field.getBoolean(ch) else "-",
+                                                int(rv.getChildAdapterPosition(ch)), int(ch.getX())))
+        _log("%s cur=%d [%s]" % (why, cur, " ".join(parts)))
