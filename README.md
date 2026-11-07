@@ -8,6 +8,10 @@ A Nagram XF plugin that draws an outline in your accent color around the open to
 2. Send it to yourself in Nagram XF and tap it, or open it from Settings, Plugins.
 3. Turn it on. Settings: on or off, and border width (Thin, Medium, Thick).
 
+## What's new in 1.0.7
+
+The open Usage tab could show its blue label and light fill with no outline. The outline is now never skipped while the app itself marks a tab as open: if the plugin's own lookup comes up empty, it outlines the tab the app marked.
+
 ## What's new in 1.0.6
 
 A topic tab could stay bold and blue after you left it, as if it were still open. The outline then went missing on that topic and on the one you opened. The outline now follows the topic that is really open, and any tab still showing itself as open gets set back to normal right after the frame it was seen in. Only the open topic is ever bold, blue and outlined.
