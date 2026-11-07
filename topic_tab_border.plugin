@@ -2,7 +2,7 @@ __id__ = "topic_tab_border"
 __name__ = "Topic Tab Border"
 __description__ = "Draws a border around the selected topic tab in forum groups, in the accent color, like the Media, Files and Links switch on a profile. The tab's background stays as it is. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 # Stock XF marks the selected topic in the top topic tabs with a faint filled pill
 # only (TopicsTabsView: topTabs.dispatchDraw draws lineRect with linePaint at alpha
@@ -15,6 +15,12 @@ __version__ = "1.0.6"
 # settings read at most twice a second. A before hook empties lineRect; stock fills
 # it only when the selected tab is on screen, so a filled rect after the draw means
 # "selected tab visible" without walking the children.
+# 1.0.7 (owner 11-07-2026: "the topic tab border is glitching again for the usage topic"): the open
+# Usage tab showed stock's light fill and its blue bold label but no border. The border is now never
+# skipped while stock marks a tab: if the plugin's own lookup of the open tab finds nothing or fails,
+# it strokes stock's rect. The cached strip data is checked against the strip it belongs to (a new
+# strip that got an old strip's hash used to read the old screen's open topic), and every distinct
+# error is logged once instead of only the first three of the whole app run.
 # Logcat tag: TopicTabBorder.
 
 import time
@@ -63,7 +69,7 @@ class TopicTabBorderPlugin(BasePlugin):
         ]
 
     def on_plugin_load(self):
-        self.errors = 0
+        self.errors = set()
         self.paint = Paint(Paint.ANTI_ALIAS_FLAG)
         self.paint.setStyle(PaintStyle.STROKE)
         self.fill = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -112,17 +118,13 @@ class TopicTabBorderPlugin(BasePlugin):
                     if v is not None:
                         v[0].setEmpty()
                 except Exception as e:
-                    if plugin.errors < 3:
-                        plugin.errors += 1
-                        _log("draw before: %s" % e)
+                    plugin._err("draw before", e)
 
             def after_hooked_method(self, param):
                 try:
                     plugin._draw(param.thisObject, param.args[0])
                 except Exception as e:
-                    if plugin.errors < 3:
-                        plugin.errors += 1
-                        _log("draw: %s" % e)
+                    plugin._err("draw", e)
 
         self.hook_method(target.getDeclaredMethod("dispatchDraw", canvas_cls), DrawHook())
 
@@ -144,6 +146,14 @@ class TopicTabBorderPlugin(BasePlugin):
                 self.hook_method(m, SelectHook())
         _log("loaded %s on %s" % (__version__, target.getName()))
 
+    def _err(self, where, e):
+        """Each distinct error once per app run (at most 20), never every frame."""
+        key = "%s: %s" % (where, e)
+        if key in self.errors or len(self.errors) >= 20:
+            return
+        self.errors.add(key)
+        _log(key)
+
     def _settings(self):
         now = time.monotonic()
         if now - self.conf_t > 0.5:
@@ -158,10 +168,12 @@ class TopicTabBorderPlugin(BasePlugin):
     def _view(self, rv):
         key = int(rv.hashCode())
         v = self.views.get(key)
+        if v is not None and not v[3].equals(rv):
+            v = None      # another strip got this hash after the old one was gone
         if v is None:
             outer = get_private_field(rv, "this$0")
             rp = get_private_field(outer, "resourcesProvider") if outer is not None else None
-            v = (self.rect_field.get(rv), rp, outer)
+            v = (self.rect_field.get(rv), rp, outer, rv)
             if len(self.views) > 20:
                 self.views.clear()
             self.views[key] = v
@@ -175,9 +187,15 @@ class TopicTabBorderPlugin(BasePlugin):
         rect = v[0]
         # the border always follows the tab that shows itself as selected; the stock
         # rect is used only while it sits on that tab (so the slide animation is kept)
-        own = self._selected_rect(rv, v[2])
+        try:
+            own = self._selected_rect(rv, v[2])
+        except Exception as e:
+            self._err("open tab", e)
+            own = None
         if own is None:
-            return
+            if rect is None or rect.isEmpty():
+                return
+            own = rect    # stock marked a tab: that one gets the border
         if rect is None or rect.isEmpty() or not (own.left - self.d4 <= rect.centerX() <= own.right + self.d4):
             rect = own
             stock_missed = True
