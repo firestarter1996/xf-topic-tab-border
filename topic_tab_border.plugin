@@ -2,7 +2,7 @@ __id__ = "topic_tab_border"
 __name__ = "Topic Tab Border"
 __description__ = "Draws a border around the selected topic tab in forum groups, in the accent color, like the Media, Files and Links switch on a profile. The tab's background stays as it is. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.0.7"
+__version__ = "1.0.8"
 
 # Stock XF marks the selected topic in the top topic tabs with a faint filled pill
 # only (TopicsTabsView: topTabs.dispatchDraw draws lineRect with linePaint at alpha
@@ -21,14 +21,24 @@ __version__ = "1.0.7"
 # it strokes stock's rect. The cached strip data is checked against the strip it belongs to (a new
 # strip that got an old strip's hash used to read the old screen's open topic), and every distinct
 # error is logged once instead of only the first three of the whole app run.
+# 1.0.8 (11-08-2026, XF force closed twice right after start): the plugin defined its own
+# Runnable class (_Fix) when it was imported. Chaquopy maps every Python Runnable to one shared
+# Java proxy class and registers each new Python class for it BEFORE that class is finished.
+# Python Runnables of other plugins that ran on the main thread or the storage queue at that
+# moment were rebuilt through the half built _Fix class ("'_Fix' object has no attribute
+# '_chaquopyGetType'") and the error killed the app. Now: no Runnable class of its own (the
+# SDK's R, built before any plugin runs), ONE Runnable made at load and kept for the whole run
+# (flags waiting to be set right are batched into it, never a new object per frame), its posted
+# run is removed on unload, and the hooks are installed on the UI thread so a frame being drawn
+# can never meet a hook that is half installed.
 # Logcat tag: TopicTabBorder.
 
 import time
 
-from java import jclass, jint, dynamic_proxy
+from java import jclass, jint
 from base_plugin import BasePlugin, MethodHook
 from hook_utils import find_class, get_private_field
-from android_utils import dp
+from android_utils import dp, R
 from ui.settings import Header, Switch, Selector
 
 LOG_TAG = "TopicTabBorder"
@@ -36,20 +46,8 @@ Paint = jclass("android.graphics.Paint")
 PaintStyle = jclass("android.graphics.Paint$Style")
 Theme = jclass("org.telegram.ui.ActionBar.Theme")
 WIDTHS = [1.0, 1.5, 2.0]
-
-
-class _Fix(dynamic_proxy(jclass("java.lang.Runnable"))):
-    """Sets one tab's selected look back in line with the open topic, after the frame."""
-    def __init__(self, tab, want):
-        super().__init__()
-        self.tab = tab
-        self.want = want
-
-    def run(self):
-        try:
-            self.tab.setSelected(self.want)
-        except Exception:
-            pass
+Looper = jclass("android.os.Looper")
+AndroidUtilities = jclass("org.telegram.messenger.AndroidUtilities")
 
 
 def _log(msg):
@@ -69,7 +67,57 @@ class TopicTabBorderPlugin(BasePlugin):
         ]
 
     def on_plugin_load(self):
+        self.alive = True
         self.errors = set()
+        self.pending = {}         # tab hash -> (tab, wanted selected flag), set right after the frame
+        self.fix_view = None      # the strip the fix run was posted on
+        self.fix_posted = False
+        self.fix_run = R(self._run_fixes)   # kept for the whole run, reused for every post
+        self.install_run = None
+        if Looper.myLooper() == Looper.getMainLooper():
+            self._install()
+        else:
+            self.install_run = R(self._install)
+            AndroidUtilities.runOnUIThread(self.install_run)
+
+    def on_plugin_unload(self):
+        self.alive = False
+        try:
+            if self.fix_view is not None:
+                self.fix_view.removeCallbacks(self.fix_run)
+        except Exception:
+            pass
+        try:
+            if self.install_run is not None:
+                AndroidUtilities.cancelRunOnUIThread(self.install_run)
+        except Exception:
+            pass
+        self.pending = {}
+        self.fix_view = None
+        self.fix_posted = False
+
+    def _run_fixes(self):
+        """The one posted run: sets each waiting tab's selected flag, never raises into Java."""
+        try:
+            self.fix_posted = False
+            if not self.alive:
+                self.pending = {}
+                return
+            todo = list(self.pending.values())
+            self.pending = {}
+            for tab, want in todo:
+                tab.setSelected(want)
+        except Exception as e:
+            self._err("fix", e)
+
+    def _install(self):
+        try:
+            if self.alive:
+                self._install_hooks()
+        except Exception as e:
+            _log("install: %s" % e)
+
+    def _install_hooks(self):
         self.paint = Paint(Paint.ANTI_ALIAS_FLAG)
         self.paint.setStyle(PaintStyle.STROKE)
         self.fill = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -234,7 +282,10 @@ class TopicTabBorderPlugin(BasePlugin):
             else:
                 want = int(ch.getTopicId()) == cur
                 if sel != want and int(rv.getChildAdapterPosition(ch)) >= 0:
-                    rv.post(_Fix(ch, want))
+                    self.pending[int(ch.hashCode())] = (ch, want)
+                    if not self.fix_posted:
+                        self.fix_view = rv
+                        self.fix_posted = bool(rv.post(self.fix_run))
                     self._diag(rv, cur, "fix %d->%s" % (int(ch.getTopicId()), want))
             if want and (found is None or int(rv.getChildAdapterPosition(ch)) >= 0):
                 found = ch
