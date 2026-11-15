@@ -8,6 +8,10 @@ A Nagram XF plugin that draws an outline in your accent color around the open to
 2. Send it to yourself in Nagram XF and tap it, or open it from Settings, Plugins.
 3. Turn it on. Settings: on or off, and border width (Thin, Medium, Thick).
 
+## What's new in 1.0.9 (11-15-2026)
+
+Two tabs could again show as open at the same time, bold and blue, until the app was restarted. The plugin's fix for a stuck tab was queued on the tab strip itself, and a strip drawn while it is off screen (the copy kept for the swipe back preview or a blur snapshot) holds that queued fix until it is shown again, which may never happen. The fix now goes to the app's own main thread queue, which always runs it; a fix that has not run within 0.4 seconds is queued again, and a tab still wrong after two tries is set right directly. As a second safety net the visible tabs are checked once, 0.4 seconds after every topic change, outside the draw pass. Nothing new runs per frame and nothing runs while the bar sits still.
+
 ## What's new in 1.0.8 (11-08-2026)
 
 Fixes Nagram XF force closing a few seconds after it opened. The plugin defined its own Java Runnable class while it loaded. Chaquopy gives every Python Runnable the same Java class and points it at the newest Python class before that class is finished, so another plugin's Runnable that ran on the main thread or the storage queue in that moment was rebuilt through the unfinished class and the app died with `AttributeError: '_Fix' object has no attribute '_chaquopyGetType'`. Now the plugin uses the SDK's own Runnable, makes one at load and reuses it for every fix, removes it on unload, never lets an error reach Java, and installs its hooks on the UI thread.
@@ -22,7 +26,7 @@ A topic tab could stay bold and blue after you left it, as if it were still open
 
 ## Speed
 
-The outline is drawn inside the tab strip's own draw pass, which only runs when the strip changes. There are no timers, no polling and no extra redraws: a few Java calls per frame while the tabs move, and settings are read at most twice a second. A stuck tab is fixed once and costs nothing after.
+The outline is drawn inside the tab strip's own draw pass, which only runs when the strip changes. There are no timers, no polling and no extra redraws: a few Java calls per frame while the tabs move, and settings are read at most twice a second. A stuck tab is fixed once and costs nothing after; the extra check is one short run per topic change.
 
 ## Star History
 
