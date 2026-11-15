@@ -2,7 +2,7 @@ __id__ = "topic_tab_border"
 __name__ = "Topic Tab Border"
 __description__ = "Draws a border around the selected topic tab in forum groups, in the accent color, like the Media, Files and Links switch on a profile. The tab's background stays as it is. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.0.8"
+__version__ = "1.0.9"
 
 # Stock XF marks the selected topic in the top topic tabs with a faint filled pill
 # only (TopicsTabsView: topTabs.dispatchDraw draws lineRect with linePaint at alpha
@@ -31,6 +31,18 @@ __version__ = "1.0.8"
 # (flags waiting to be set right are batched into it, never a new object per frame), its posted
 # run is removed on unload, and the hooks are installed on the UI thread so a frame being drawn
 # can never meet a hook that is half installed.
+# 1.0.9 (owner 11-15-2026: "Topic tab border has glitched out again", Usage and DIR both bold and
+# blue while Gemini was open): the run that sets a stale tab right was posted on the strip itself.
+# A strip that is drawn while it is not attached to a window (a screen kept for the swipe back
+# preview or a blur snapshot) only queues that run for its next attach, which may never come, and
+# the "already posted" flag then stayed set for the rest of the app run, so no stale tab was ever
+# set right again until XF restarted. Now the run goes to the app's own main thread queue, which
+# always runs it; a post that has not run within 0.4 s is treated as lost and posted again; and a
+# tab that is still wrong after two tries is set right directly. Nothing new runs per frame.
+# Where the stale tabs come from: XF drops a tab list update that arrives while the strip is being
+# laid out (UniversalAdapter.updateInternal returns early), so the old open tab keeps its look. A
+# second safety net therefore checks the visible tabs once, 0.4 s after every topic change, outside
+# the draw pass: one short run per topic change, nothing while the bar sits still.
 # Logcat tag: TopicTabBorder.
 
 import time
@@ -70,9 +82,13 @@ class TopicTabBorderPlugin(BasePlugin):
         self.alive = True
         self.errors = set()
         self.pending = {}         # tab hash -> (tab, wanted selected flag), set right after the frame
-        self.fix_view = None      # the strip the fix run was posted on
         self.fix_posted = False
+        self.fix_t = 0.0          # when the fix run was posted (a post older than 0.4 s is lost)
+        self.fix_lost = 0         # posts in a row that never ran
         self.fix_run = R(self._run_fixes)   # kept for the whole run, reused for every post
+        self.check_run = R(self._check)     # the one delayed check after a topic change
+        self.check_tabs = None
+        self.top_field = None
         self.install_run = None
         if Looper.myLooper() == Looper.getMainLooper():
             self._install()
@@ -83,32 +99,91 @@ class TopicTabBorderPlugin(BasePlugin):
     def on_plugin_unload(self):
         self.alive = False
         try:
-            if self.fix_view is not None:
-                self.fix_view.removeCallbacks(self.fix_run)
+            AndroidUtilities.cancelRunOnUIThread(self.fix_run)
+            AndroidUtilities.cancelRunOnUIThread(self.check_run)
         except Exception:
             pass
+        self.check_tabs = None
         try:
             if self.install_run is not None:
                 AndroidUtilities.cancelRunOnUIThread(self.install_run)
         except Exception:
             pass
         self.pending = {}
-        self.fix_view = None
         self.fix_posted = False
 
     def _run_fixes(self):
         """The one posted run: sets each waiting tab's selected flag, never raises into Java."""
         try:
             self.fix_posted = False
+            self.fix_lost = 0
             if not self.alive:
                 self.pending = {}
                 return
             todo = list(self.pending.values())
             self.pending = {}
             for tab, want in todo:
-                tab.setSelected(want)
+                try:
+                    tab.setSelected(want)
+                except Exception as e:
+                    self._err("fix tab", e)
         except Exception as e:
             self._err("fix", e)
+
+    def _check(self):
+        """0.4 s after a topic change: every visible tab of that strip shows the open topic and only
+        that one as open. Not in a draw pass, so the tabs are set directly. Never raises into Java."""
+        try:
+            tabs = self.check_tabs
+            self.check_tabs = None
+            if tabs is None or not self.alive or self.top_field is None:
+                return
+            rv = self.top_field.get(tabs)
+            if rv is None:
+                return
+            cur = int(self.cur_field.getLong(tabs))
+            changed = False
+            for i in range(min(int(rv.getChildCount()), 60)):
+                ch = rv.getChildAt(i)
+                if not self.tab_cls.isInstance(ch) or self.add_field.getBoolean(ch):
+                    continue
+                if int(rv.getChildAdapterPosition(ch)) < 0:
+                    continue
+                want = int(ch.getTopicId()) == cur
+                if self.sel_field.getBoolean(ch) != want:
+                    ch.setSelected(want)
+                    changed = True
+                    self._diag(rv, cur, "check %d->%s" % (int(ch.getTopicId()), want))
+            if changed:
+                rv.invalidate()
+        except Exception as e:
+            self._err("check", e)
+
+    def _want_fix(self, tab, want):
+        """Queues one stale tab. Called from the draw pass, so it only notes the tab and makes sure
+        the one run is on its way; it never raises."""
+        try:
+            self.pending[int(tab.hashCode())] = (tab, want)
+            if len(self.pending) > 64:
+                self.pending = {}
+                return
+            now = time.monotonic()
+            if self.fix_posted and now - self.fix_t > 0.4:
+                self.fix_posted = False       # that post never ran
+                self.fix_lost += 1
+                self._err("fix run lost", self.fix_lost)
+            if self.fix_posted:
+                return
+            if self.fix_lost >= 2:
+                # the queue is not running our posts: set the tabs right here, once
+                self.fix_lost = 0
+                self._run_fixes()
+                return
+            AndroidUtilities.runOnUIThread(self.fix_run)
+            self.fix_posted = True
+            self.fix_t = now
+        except Exception as e:
+            self._err("want fix", e)
 
     def _install(self):
         try:
@@ -187,6 +262,28 @@ class TopicTabBorderPlugin(BasePlugin):
                         par.invalidate()
                 except Exception:
                     pass
+
+        # the delayed check after every topic change (see 1.0.9 above)
+        try:
+            self.top_field = tabs_cls.getDeclaredField("topTabs")
+            self.top_field.setAccessible(True)
+
+            class TopicHook(MethodHook):
+                def after_hooked_method(self, param):
+                    try:
+                        if not plugin.alive:
+                            return
+                        plugin.check_tabs = param.thisObject
+                        AndroidUtilities.cancelRunOnUIThread(plugin.check_run)
+                        AndroidUtilities.runOnUIThread(plugin.check_run, 400)
+                    except Exception as e:
+                        plugin._err("topic hook", e)
+
+            long_t = jclass("java.lang.Long").TYPE
+            self.hook_method(tabs_cls.getDeclaredMethod("setCurrentTopic", long_t), TopicHook())
+        except Exception as e:
+            self.top_field = None
+            _log("topic change check off: %s" % e)
 
         bool_t = jclass("java.lang.Boolean").TYPE
         for m in tab_view.getDeclaredMethods():
@@ -282,10 +379,7 @@ class TopicTabBorderPlugin(BasePlugin):
             else:
                 want = int(ch.getTopicId()) == cur
                 if sel != want and int(rv.getChildAdapterPosition(ch)) >= 0:
-                    self.pending[int(ch.hashCode())] = (ch, want)
-                    if not self.fix_posted:
-                        self.fix_view = rv
-                        self.fix_posted = bool(rv.post(self.fix_run))
+                    self._want_fix(ch, want)
                     self._diag(rv, cur, "fix %d->%s" % (int(ch.getTopicId()), want))
             if want and (found is None or int(rv.getChildAdapterPosition(ch)) >= 0):
                 found = ch
