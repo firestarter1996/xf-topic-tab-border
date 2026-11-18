@@ -1,12 +1,16 @@
 # 🗂️🔵 Topic Tab Border
 
-A Nagram XF plugin that draws an outline in your accent color around the open topic in the topic tabs of a forum, like the Media, Files and Links switch on a profile. The tab keeps its normal light fill; the outline is added on top and follows the slide between tabs.
+A Nagram XF plugin that draws an outline in your accent color around the open topic in the topic tabs of a forum, like the Media, Files and Links switch on a profile. The tab keeps its normal light fill; the outline is drawn by the open tab itself, so a tab with a blue label always has its outline.
 
 ## Install
 
 1. Download `topic_tab_border.plugin` from the latest release.
 2. Send it to yourself in Nagram XF and tap it, or open it from Settings, Plugins.
 3. Turn it on. Settings: on or off, and border width (Thin, Medium, Thick).
+
+## What's new in 1.1.0 (11-18-2026)
+
+The open tab could show its blue label with no outline and no light fill, after you left that topic and opened it again. The outline was drawn by the tab strip, and the strip's picture and each tab's picture are kept separately: the tab redrew its blue label while the strip's picture still had no tab marked. The outline is now drawn inside the open tab, in the same picture as its blue label, so the two always change together. The tab redraws itself once when it turns open or closed; nothing runs per frame and nothing runs while the bar sits still. The outline now appears on the new tab as its label turns blue, instead of sliding over from the old one.
 
 ## What's new in 1.0.9 (11-15-2026)
 
@@ -26,7 +30,7 @@ A topic tab could stay bold and blue after you left it, as if it were still open
 
 ## Speed
 
-The outline is drawn inside the tab strip's own draw pass, which only runs when the strip changes. There are no timers, no polling and no extra redraws: a few Java calls per frame while the tabs move, and settings are read at most twice a second. A stuck tab is fixed once and costs nothing after; the extra check is one short run per topic change.
+The outline is drawn inside the open tab's own draw pass, which only runs when that tab changes. There are no timers, no polling and no extra redraws: a few Java calls per frame while the tabs move, and settings are read at most twice a second. A stuck tab is fixed once and costs nothing after; the extra check is one short run per topic change.
 
 ## Star History
 
